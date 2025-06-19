@@ -23,6 +23,7 @@ NODES=(
     "https://github.com/Derfuu/Derfuu_ComfyUI_ModdedNodes"
     "https://github.com/replicate/comfyui-replicate"
     "https://github.com/WASasquatch/was-node-suite-comfyui"
+    "https://github.com/talesofai/comfyui-browser"
 )
 
 WORKFLOWS=(
