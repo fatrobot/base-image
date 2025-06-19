@@ -1,20 +1,21 @@
 #!/bin/bash
 
-source /venv/main/bin/activate
-COMFYUI_DIR=${WORKSPACE}/ComfyUI
+set -e  # 脚本遇到错误直接退出，避免隐藏错误
+set -o pipefail
 
-# Packages are installed after nodes so we can fix them...
+source /venv/main/bin/activate
+COMFYUI_DIR="${WORKSPACE}/ComfyUI"
+
+# 预定义 APT/PIP 依赖（可扩展）
 APT_PACKAGES=(
-    #"package-1"
-    #"package-2"
+    "git" "ffmpeg" "libgl1" "libglib2.0-0"
 )
 
 PIP_PACKAGES=(
-    #"package-1"
-    #"package-2"
+    "torch" "torchvision" "transformers"
 )
 
-# 新增自定义节点列表
+# 自定义节点列表
 NODES=(
     "https://github.com/ltdrdata/ComfyUI-Manager"
     "https://github.com/pythongosssss/ComfyUI-Custom-Scripts"
@@ -34,143 +35,137 @@ CLIP_MODELS=(
     "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"
 )
 
-UNET_MODELS=(
-)
+UNET_MODELS=()
+VAE_MODELS=()
 
-VAE_MODELS=(
-)
-
-### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
-
+### 核心流程 ###
 function provisioning_start() {
-    provisioning_print_header
+    print_header
 
-    # 【新增】更新 ComfyUI 主程序
     update_comfyui
+    install_apt_packages
+    install_pip_packages
+    install_custom_nodes
 
-    provisioning_get_apt_packages
-    provisioning_get_nodes
-    provisioning_get_pip_packages
-
+    # 下载 workflow 文件
     workflows_dir="${COMFYUI_DIR}/user/default/workflows"
     mkdir -p "${workflows_dir}"
-    provisioning_get_files \
-        "${workflows_dir}" \
-        "${WORKFLOWS[@]}"
+    download_files "${workflows_dir}" "${WORKFLOWS[@]}"
 
-    if provisioning_has_valid_hf_token; then
+    # 模型下载逻辑
+    if validate_hf_token; then
         UNET_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors")
         VAE_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors")
     else
         UNET_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
         VAE_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors")
-        sed -i 's/flux1-dev\.safetensors/flux1-schnell.safetensors/g' "${workflows_dir}/flux_dev_example.json"
+        sed -i 's/flux1-dev\.safetensors/flux1-schnell.safetensors/g' "${workflows_dir}/flux_dev_example.json" || true
     fi
 
-    provisioning_get_files "${COMFYUI_DIR}/models/unet" "${UNET_MODELS[@]}"
-    provisioning_get_files "${COMFYUI_DIR}/models/vae" "${VAE_MODELS[@]}"
-    provisioning_get_files "${COMFYUI_DIR}/models/clip" "${CLIP_MODELS[@]}"
+    download_files "${COMFYUI_DIR}/models/unet" "${UNET_MODELS[@]}"
+    download_files "${COMFYUI_DIR}/models/vae" "${VAE_MODELS[@]}"
+    download_files "${COMFYUI_DIR}/models/clip" "${CLIP_MODELS[@]}"
 
-    provisioning_print_end
+    print_footer
 }
 
-# 新增 ComfyUI 主程序更新逻辑
+### 更新 ComfyUI 主程序 ###
 function update_comfyui() {
-    printf "Updating ComfyUI core...\n"
+    echo "Updating ComfyUI core..."
     if [[ -d "${COMFYUI_DIR}/.git" ]]; then
-        ( cd "${COMFYUI_DIR}" && git pull )
+        (cd "${COMFYUI_DIR}" && git pull)
     else
-        printf "Warning: ComfyUI directory not a git repo. Skipping update.\n"
+        echo "Warning: ${COMFYUI_DIR} not a git repo. Skipping update."
     fi
 }
 
-function provisioning_get_apt_packages() {
-    if [[ -n $APT_PACKAGES ]]; then
-        sudo $APT_INSTALL ${APT_PACKAGES[@]}
+### 安装系统包 ###
+function install_apt_packages() {
+    if [[ ${#APT_PACKAGES[@]} -gt 0 ]]; then
+        sudo apt-get update
+        sudo apt-get install -y "${APT_PACKAGES[@]}"
     fi
 }
 
-function provisioning_get_pip_packages() {
-    if [[ -n $PIP_PACKAGES ]]; then
-        pip install --no-cache-dir ${PIP_PACKAGES[@]}
+### 安装 pip 包 ###
+function install_pip_packages() {
+    if [[ ${#PIP_PACKAGES[@]} -gt 0 ]]; then
+        pip install --no-cache-dir "${PIP_PACKAGES[@]}"
     fi
 }
 
-function provisioning_get_nodes() {
+### 安装自定义节点 ###
+function install_custom_nodes() {
     for repo in "${NODES[@]}"; do
         dir="${repo##*/}"
         path="${COMFYUI_DIR}/custom_nodes/${dir}"
         requirements="${path}/requirements.txt"
-        if [[ -d $path ]]; then
-            if [[ ${AUTO_UPDATE,,} != "false" ]]; then
-                printf "Updating node: %s...\n" "${repo}"
-                ( cd "$path" && git pull )
-                if [[ -e $requirements ]]; then
-                    pip install --no-cache-dir -r "$requirements"
-                fi
-            fi
+        if [[ -d "$path" ]]; then
+            echo "Updating node: $repo"
+            (cd "$path" && git pull)
         else
-            printf "Downloading node: %s...\n" "${repo}"
-            git clone "${repo}" "${path}" --recursive
-            if [[ -e $requirements ]]; then
-                pip install --no-cache-dir -r "${requirements}"
-            fi
+            echo "Cloning node: $repo"
+            git clone --recursive "$repo" "$path"
+        fi
+        # 不论更新与否，都重新尝试安装依赖（更健壮）
+        if [[ -f "$requirements" ]]; then
+            pip install --no-cache-dir -r "$requirements" || true
         fi
     done
 }
 
-function provisioning_get_files() {
-    if [[ -z $2 ]]; then return 1; fi
-    dir="$1"
-    mkdir -p "$dir"
+### 下载模型或文件 ###
+function download_files() {
+    local dir="$1"
     shift
-    arr=("$@")
-    printf "Downloading %s model(s) to %s...\n" "${#arr[@]}" "$dir"
-    for url in "${arr[@]}"; do
-        printf "Downloading: %s\n" "${url}"
-        provisioning_download "${url}" "${dir}"
-        printf "\n"
+    local urls=("$@")
+    mkdir -p "$dir"
+    echo "Downloading ${#urls[@]} file(s) to ${dir}..."
+    for url in "${urls[@]}"; do
+        echo "Downloading: $url"
+        download_with_token "$url" "$dir"
     done
 }
 
-function provisioning_print_header() {
-    printf "\n##############################################\n"
-    printf "# Provisioning container - starting now      #\n"
-    printf "##############################################\n\n"
-}
-
-function provisioning_print_end() {
-    printf "\nProvisioning complete: Application will start now\n\n"
-}
-
-function provisioning_has_valid_hf_token() {
-    [[ -n "$HF_TOKEN" ]] || return 1
-    url="https://huggingface.co/api/whoami-v2"
-    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" -H "Authorization: Bearer $HF_TOKEN" -H "Content-Type: application/json")
-    if [ "$response" -eq 200 ]; then return 0; else return 1; fi
-}
-
-function provisioning_has_valid_civitai_token() {
-    [[ -n "$CIVITAI_TOKEN" ]] || return 1
-    url="https://civitai.com/api/v1/models?hidden=1&limit=1"
-    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" -H "Authorization: Bearer $CIVITAI_TOKEN" -H "Content-Type: application/json")
-    if [ "$response" -eq 200 ]; then return 0; else return 1; fi
-}
-
-function provisioning_download() {
-    if [[ -n $HF_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
+### 文件下载逻辑（支持 HF / Civitai Token）###
+function download_with_token() {
+    local url="$1"
+    local dir="$2"
+    local auth_token=""
+    if [[ "$url" =~ huggingface\.co ]] && [[ -n "$HF_TOKEN" ]]; then
         auth_token="$HF_TOKEN"
-    elif [[ -n $CIVITAI_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
+    elif [[ "$url" =~ civitai\.com ]] && [[ -n "$CIVITAI_TOKEN" ]]; then
         auth_token="$CIVITAI_TOKEN"
     fi
-    if [[ -n $auth_token ]];then
-        wget --header="Authorization: Bearer $auth_token" -qnc --content-disposition --show-progress -e dotbytes="${3:-4M}" -P "$2" "$1"
+
+    if [[ -n "$auth_token" ]]; then
+        wget --header="Authorization: Bearer $auth_token" -c --content-disposition -P "$dir" "$url"
     else
-        wget -qnc --content-disposition --show-progress -e dotbytes="${3:-4M}" -P "$2" "$1"
+        wget -c --content-disposition -P "$dir" "$url"
     fi
 }
 
-# 启动入口
+### 校验 Huggingface Token ###
+function validate_hf_token() {
+    if [[ -z "$HF_TOKEN" ]]; then return 1; fi
+    response=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $HF_TOKEN" "https://huggingface.co/api/whoami-v2")
+    [[ "$response" == "200" ]]
+}
+
+### 格式化输出 ###
+function print_header() {
+    echo -e "\n==============================================="
+    echo " Provisioning start: $(date)"
+    echo "==============================================="
+}
+
+function print_footer() {
+    echo -e "\n==============================================="
+    echo " Provisioning complete: $(date)"
+    echo "===============================================\n"
+}
+
+### 启动入口 ###
 if [[ ! -f /.noprovisioning ]]; then
     provisioning_start
 fi
