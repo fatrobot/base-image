@@ -24,6 +24,7 @@ NODES=(
     "https://github.com/replicate/comfyui-replicate"
     "https://github.com/WASasquatch/was-node-suite-comfyui"
     "https://github.com/talesofai/comfyui-browser"
+    "https://github.com/yolain/ComfyUI-Easy-Use"
 )
 
 WORKFLOWS=(
