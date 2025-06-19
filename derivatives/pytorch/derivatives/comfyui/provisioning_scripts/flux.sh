@@ -1,18 +1,17 @@
 #!/bin/bash
 
-set -e  # 脚本遇到错误直接退出，避免隐藏错误
-set -o pipefail
-
 source /venv/main/bin/activate
-COMFYUI_DIR="${WORKSPACE}/ComfyUI"
+COMFYUI_DIR=${WORKSPACE}/ComfyUI
 
-# 预定义 APT/PIP 依赖（可扩展）
+# Packages are installed after nodes so we can fix them...
 APT_PACKAGES=(
-    "git" "ffmpeg" "libgl1" "libglib2.0-0"
+    #"package-1"
+    #"package-2"
 )
 
 PIP_PACKAGES=(
-    "torch" "torchvision" "transformers"
+    #"package-1"
+    #"package-2"
 )
 
 # 自定义节点列表
@@ -35,137 +34,164 @@ CLIP_MODELS=(
     "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"
 )
 
-UNET_MODELS=()
-VAE_MODELS=()
+UNET_MODELS=(
+)
 
-### 核心流程 ###
+VAE_MODELS=(
+)
+
+### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
+
 function provisioning_start() {
-    print_header
+    provisioning_print_header
 
+    # 更新 ComfyUI 主程序
     update_comfyui
-    install_apt_packages
-    install_pip_packages
-    install_custom_nodes
 
-    # 下载 workflow 文件
+    provisioning_get_apt_packages
+    provisioning_get_nodes
+    provisioning_get_pip_packages
+
     workflows_dir="${COMFYUI_DIR}/user/default/workflows"
     mkdir -p "${workflows_dir}"
-    download_files "${workflows_dir}" "${WORKFLOWS[@]}"
+    provisioning_get_files "${workflows_dir}" "${WORKFLOWS[@]}"
 
-    # 模型下载逻辑
-    if validate_hf_token; then
+    if provisioning_has_valid_hf_token; then
         UNET_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors")
         VAE_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors")
     else
         UNET_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors")
         VAE_MODELS+=("https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors")
-        sed -i 's/flux1-dev\.safetensors/flux1-schnell.safetensors/g' "${workflows_dir}/flux_dev_example.json" || true
+        sed -i 's/flux1-dev\.safetensors/flux1-schnell.safetensors/g' "${workflows_dir}/flux_dev_example.json"
     fi
 
-    download_files "${COMFYUI_DIR}/models/unet" "${UNET_MODELS[@]}"
-    download_files "${COMFYUI_DIR}/models/vae" "${VAE_MODELS[@]}"
-    download_files "${COMFYUI_DIR}/models/clip" "${CLIP_MODELS[@]}"
+    provisioning_get_files "${COMFYUI_DIR}/models/unet" "${UNET_MODELS[@]}"
+    provisioning_get_files "${COMFYUI_DIR}/models/vae" "${VAE_MODELS[@]}"
+    provisioning_get_files "${COMFYUI_DIR}/models/clip" "${CLIP_MODELS[@]}"
 
-    print_footer
+    provisioning_print_end
 }
 
-### 更新 ComfyUI 主程序 ###
 function update_comfyui() {
-    echo "Updating ComfyUI core..."
+    printf "Updating ComfyUI core...\n"
     if [[ -d "${COMFYUI_DIR}/.git" ]]; then
-        (cd "${COMFYUI_DIR}" && git pull)
+        ( cd "${COMFYUI_DIR}" && git pull )
     else
-        echo "Warning: ${COMFYUI_DIR} not a git repo. Skipping update."
+        printf "Warning: ComfyUI directory not a git repo. Skipping update.\n"
     fi
 }
 
-### 安装系统包 ###
-function install_apt_packages() {
-    if [[ ${#APT_PACKAGES[@]} -gt 0 ]]; then
-        sudo apt-get update
-        sudo apt-get install -y "${APT_PACKAGES[@]}"
+function provisioning_get_apt_packages() {
+    if [[ -n $APT_PACKAGES ]]; then
+        sudo $APT_INSTALL ${APT_PACKAGES[@]}
     fi
 }
 
-### 安装 pip 包 ###
-function install_pip_packages() {
-    if [[ ${#PIP_PACKAGES[@]} -gt 0 ]]; then
-        pip install --no-cache-dir "${PIP_PACKAGES[@]}"
+function provisioning_get_pip_packages() {
+    if [[ -n $PIP_PACKAGES ]]; then
+        pip install --no-cache-dir ${PIP_PACKAGES[@]}
     fi
 }
 
-### 安装自定义节点 ###
-function install_custom_nodes() {
+# === 节点安装逻辑优化版 ===
+function provisioning_get_nodes() {
     for repo in "${NODES[@]}"; do
         dir="${repo##*/}"
         path="${COMFYUI_DIR}/custom_nodes/${dir}"
         requirements="${path}/requirements.txt"
-        if [[ -d "$path" ]]; then
-            echo "Updating node: $repo"
-            (cd "$path" && git pull)
+        if [[ -d $path ]]; then
+            if [[ ${AUTO_UPDATE,,} != "false" ]]; then
+                printf "Updating node: %s...\n" "${repo}"
+                ( cd "$path" && git pull )
+            else
+                printf "Skipping update for node: %s (AUTO_UPDATE disabled)\n" "${repo}"
+            fi
         else
-            echo "Cloning node: $repo"
-            git clone --recursive "$repo" "$path"
+            printf "Cloning new node: %s...\n" "${repo}"
+            git clone "${repo}" "${path}" --recursive
         fi
-        # 不论更新与否，都重新尝试安装依赖（更健壮）
-        if [[ -f "$requirements" ]]; then
-            pip install --no-cache-dir -r "$requirements" || true
+
+        if [[ -f "${requirements}" ]]; then
+            printf "Installing pip requirements for node: %s...\n" "${repo}"
+            pip install --no-cache-dir -r "${requirements}" || true
+        else
+            printf "No requirements.txt found for node: %s, skipping pip install.\n" "${repo}"
         fi
     done
 }
 
-### 下载模型或文件 ###
-function download_files() {
-    local dir="$1"
-    shift
-    local urls=("$@")
+function provisioning_get_files() {
+    if [[ -z $2 ]]; then return 1; fi
+    dir="$1"
     mkdir -p "$dir"
-    echo "Downloading ${#urls[@]} file(s) to ${dir}..."
-    for url in "${urls[@]}"; do
-        echo "Downloading: $url"
-        download_with_token "$url" "$dir"
+    shift
+    arr=("$@")
+    printf "Downloading %s model(s) to %s...\n" "${#arr[@]}" "$dir"
+    for url in "${arr[@]}"; do
+        printf "Downloading: %s\n" "${url}"
+        provisioning_download "${url}" "${dir}"
+        printf "\n"
     done
 }
 
-### 文件下载逻辑（支持 HF / Civitai Token）###
-function download_with_token() {
-    local url="$1"
-    local dir="$2"
-    local auth_token=""
-    if [[ "$url" =~ huggingface\.co ]] && [[ -n "$HF_TOKEN" ]]; then
+function provisioning_print_header() {
+    printf "\n##############################################\n"
+    printf "# Provisioning container - starting now      #\n"
+    printf "##############################################\n\n"
+}
+
+function provisioning_print_end() {
+    printf "\nProvisioning complete: Application will start now\n\n"
+}
+
+function provisioning_has_valid_hf_token() {
+    [[ -n "$HF_TOKEN" ]] || return 1
+    url="https://huggingface.co/api/whoami-v2"
+    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" -H "Authorization: Bearer $HF_TOKEN" -H "Content-Type: application/json")
+    if [ "$response" -eq 200 ]; then return 0; else return 1; fi
+}
+
+function provisioning_has_valid_civitai_token() {
+    [[ -n "$CIVITAI_TOKEN" ]] || return 1
+    url="https://civitai.com/api/v1/models?hidden=1&limit=1"
+    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" -H "Authorization: Bearer $CIVITAI_TOKEN" -H "Content-Type: application/json")
+    if [ "$response" -eq 200 ]; then return 0; else return 1; fi
+}
+
+# === 断点续传优化版下载函数 ===
+function provisioning_download() {
+    if [[ -n $HF_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
         auth_token="$HF_TOKEN"
-    elif [[ "$url" =~ civitai\.com ]] && [[ -n "$CIVITAI_TOKEN" ]]; then
+    elif [[ -n $CIVITAI_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
         auth_token="$CIVITAI_TOKEN"
     fi
 
-    if [[ -n "$auth_token" ]]; then
-        wget --header="Authorization: Bearer $auth_token" -c --content-disposition -P "$dir" "$url"
-    else
-        wget -c --content-disposition -P "$dir" "$url"
+    retry=3
+    while [[ $retry -gt 0 ]]; do
+        if [[ -n $auth_token ]]; then
+            wget -c --header="Authorization: Bearer $auth_token" \
+                --content-disposition \
+                --show-progress \
+                -e dotbytes="${3:-4M}" \
+                -P "$2" "$1" && break
+        else
+            wget -c --content-disposition \
+                --show-progress \
+                -e dotbytes="${3:-4M}" \
+                -P "$2" "$1" && break
+        fi
+
+        printf "Download failed: %s. Retrying...\n" "${1}"
+        ((retry--))
+        sleep 5
+    done
+
+    if [[ $retry -eq 0 ]]; then
+        printf "Download failed after retries: %s\n" "${1}"
     fi
 }
 
-### 校验 Huggingface Token ###
-function validate_hf_token() {
-    if [[ -z "$HF_TOKEN" ]]; then return 1; fi
-    response=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $HF_TOKEN" "https://huggingface.co/api/whoami-v2")
-    [[ "$response" == "200" ]]
-}
-
-### 格式化输出 ###
-function print_header() {
-    echo -e "\n==============================================="
-    echo " Provisioning start: $(date)"
-    echo "==============================================="
-}
-
-function print_footer() {
-    echo -e "\n==============================================="
-    echo " Provisioning complete: $(date)"
-    echo "===============================================\n"
-}
-
-### 启动入口 ###
+# 启动入口
 if [[ ! -f /.noprovisioning ]]; then
     provisioning_start
 fi
