@@ -2,30 +2,37 @@
 
 # SD-Scripts FLUX.1/SD3 Training Environment Provisioning Script
 # For vast.ai with CUDA 12.4.1 and Ubuntu 22.04
-# Version: 1.0
-# Last updated: 2025-01-18
 
-# 脚本出错时退出
+# 脚本出错时继续执行，记录错误
 set -eo pipefail
 
-echo "=== SD-Scripts FLUX.1/SD3 Training Environment Setup ==="
-echo "Starting provisioning script..."
-echo "Version: 1.0"
-echo "Base image: cuda-12.4.1-cudnn-devel-ubuntu22.04-py310"
+# 创建日志函数
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+log_error() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2
+}
+
+log "=== SD-Scripts FLUX.1/SD3 Training Environment Setup ==="
+log "Starting provisioning script..."
+log "Version: 1.1"
+log "Base image: cuda-12.4.1-cudnn-devel-ubuntu22.04-py310"
 
 # 记录开始时间
 START_TIME=$(date)
-echo "Start time: $START_TIME"
+log "Start time: $START_TIME"
 
 # 切换到持久化目录
 cd /workspace/
 
 # ========== 系统环境准备 ==========
-echo "=== Phase 1: System Environment Setup ==="
+log "=== Phase 1: System Environment Setup ==="
 
 # 更新系统包和安装编译工具
-echo ">>> Updating system packages and installing build tools..."
-apt-get update -y
+log ">>> Updating system packages and installing build tools..."
+apt-get update -y || log_error "Failed to update apt packages"
 apt-get install -y \
     git \
     wget \
@@ -48,119 +55,161 @@ apt-get install -y \
     cmake \
     htop \
     tmux \
-    vim
+    vim || log_error "Failed to install some system packages"
 
 # 设置内存优化
-echo ">>> Setting up memory optimization..."
+log ">>> Setting up memory optimization..."
 export LD_PRELOAD=libtcmalloc.so.4:$LD_PRELOAD
 echo 'export LD_PRELOAD=libtcmalloc.so.4:$LD_PRELOAD' >> /etc/environment
 
 # 验证 CUDA 环境
-echo ">>> Verifying CUDA environment..."
-nvidia-smi
-nvcc --version
+log ">>> Verifying CUDA environment..."
+nvidia-smi || log_error "nvidia-smi failed"
+nvcc --version || log_error "nvcc not found"
 
 # 设置 CUDA 相关环境变量
-echo ">>> Setting up CUDA environment variables..."
+log ">>> Setting up CUDA environment variables..."
 export CUDA_HOME=/usr/local/cuda
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export TORCH_CUDA_ARCH_LIST="6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
 
 # ========== Python 环境设置 ==========
-echo "=== Phase 2: Python Environment Setup ==="
+log "=== Phase 2: Python Environment Setup ==="
 
 # 创建 Python 虚拟环境
-echo ">>> Creating Python virtual environment..."
+log ">>> Creating Python virtual environment..."
 python3.10 -m venv sd-scripts-env
 source sd-scripts-env/bin/activate
 
 # 验证 Python 版本
-echo "Python version: $(python --version)"
-echo "Pip version: $(pip --version)"
+log "Python version: $(python --version)"
+log "Pip version: $(pip --version)"
 
 # 升级 pip 和基础工具
-echo ">>> Upgrading pip and basic tools..."
+log ">>> Upgrading pip and basic tools..."
 pip install --upgrade pip setuptools wheel
 
 # ========== SD-Scripts 项目设置 ==========
-echo "=== Phase 3: SD-Scripts Project Setup ==="
+log "=== Phase 3: SD-Scripts Project Setup ==="
 
 # 克隆 sd-scripts 项目 (sd3 分支)
-echo ">>> Cloning sd-scripts repository (sd3 branch)..."
+log ">>> Cloning sd-scripts repository (sd3 branch)..."
 if [ -d "sd-scripts" ]; then
-    echo "sd-scripts directory exists, removing..."
+    log "sd-scripts directory exists, removing..."
     rm -rf sd-scripts
 fi
 
-git clone --branch sd3 --depth 1 https://github.com/kohya-ss/sd-scripts.git
+git clone --branch sd3 --depth 1 https://github.com/kohya-ss/sd-scripts.git || {
+    log_error "Failed to clone sd-scripts repository"
+    exit 1
+}
 cd sd-scripts
 
 # ========== 依赖安装 ==========
-echo "=== Phase 4: Dependencies Installation ==="
+log "=== Phase 4: Dependencies Installation ==="
+
+# 首先安装特定版本的 triton (修复 bitsandbytes 的依赖)
+log ">>> Installing triton..."
+pip install triton==3.0.0 || log_error "Failed to install triton"
 
 # 安装 PyTorch 2.4.0 with CUDA 12.4 (README 明确要求)
-echo ">>> Installing PyTorch 2.4.0 with CUDA 12.4..."
-pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+log ">>> Installing PyTorch 2.4.0 with CUDA 12.4..."
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124 || {
+    log_error "Failed to install PyTorch"
+    exit 1
+}
 
 # 验证 PyTorch 安装
-echo ">>> Verifying PyTorch installation..."
-python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')"
+log ">>> Verifying PyTorch installation..."
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')" || log_error "PyTorch verification failed"
 
-# 安装 xformers (与 PyTorch 2.4.0 兼容的版本)
-echo ">>> Installing xformers for PyTorch 2.4.0..."
-pip install xformers --index-url https://download.pytorch.org/whl/cu124
+# 安装项目依赖 (严格按照 requirements.txt，但跳过 -e . 行)
+log ">>> Installing sd-scripts requirements..."
+# 创建一个临时的 requirements 文件，排除 -e . 行
+grep -v "^-e " requirements.txt > temp_requirements.txt
+pip install -r temp_requirements.txt || log_error "Failed to install some requirements"
+rm temp_requirements.txt
 
-# 安装项目依赖 (严格按照 requirements.txt)
-echo ">>> Installing sd-scripts requirements..."
-pip install -r requirements.txt
+# 安装项目本身（使用可编辑模式）
+pip install -e . || log_error "Failed to install sd-scripts package"
+
+# 安装与 PyTorch 2.4.0 兼容的 xformers（指定版本避免升级torch）
+log ">>> Installing xformers for PyTorch 2.4.0..."
+pip install xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu124 --no-deps || log_error "Failed to install xformers"
 
 # 验证关键依赖版本
-echo ">>> Verifying key dependencies versions..."
+log ">>> Verifying key dependencies versions..."
 python -c "
-import accelerate, transformers, diffusers, bitsandbytes, safetensors
-print(f'accelerate: {accelerate.__version__}')
-print(f'transformers: {transformers.__version__}')
-print(f'diffusers: {diffusers.__version__}')
-print(f'bitsandbytes: {bitsandbytes.__version__}')
-print(f'safetensors: {safetensors.__version__}')
-"
+import sys
+try:
+    import accelerate
+    print(f'accelerate: {accelerate.__version__}')
+except ImportError as e:
+    print(f'accelerate: Import failed - {e}')
+
+try:
+    import transformers
+    print(f'transformers: {transformers.__version__}')
+except ImportError as e:
+    print(f'transformers: Import failed - {e}')
+
+try:
+    import diffusers
+    print(f'diffusers: {diffusers.__version__}')
+except ImportError as e:
+    print(f'diffusers: Import failed - {e}')
+
+try:
+    import bitsandbytes
+    print(f'bitsandbytes: {bitsandbytes.__version__}')
+except ImportError as e:
+    print(f'bitsandbytes: Import failed - {e}')
+
+try:
+    import safetensors
+    print(f'safetensors: {safetensors.__version__}')
+except ImportError as e:
+    print(f'safetensors: Import failed - {e}')
+
+try:
+    import torch
+    print(f'torch: {torch.__version__}')
+except ImportError as e:
+    print(f'torch: Import failed - {e}')
+" || log_error "Dependency verification failed"
 
 # 安装 DeepSpeed (README 明确要求的版本)
-echo ">>> Installing DeepSpeed (required for FLUX.1/SD3)..."
-pip install deepspeed==0.16.7
+log ">>> Installing DeepSpeed (required for FLUX.1/SD3)..."
+pip install deepspeed==0.16.7 || log_error "Failed to install DeepSpeed"
 
 # 安装额外的性能优化包
-echo ">>> Installing additional performance packages..."
-pip install --no-deps wandb || echo "wandb installation failed, continuing..."
+log ">>> Installing additional performance packages..."
+pip install --no-deps wandb || log_error "wandb installation failed"
 
 # 尝试安装 flash-attention (可能失败)
-echo ">>> Attempting to install flash-attention..."
-pip install flash-attn --no-build-isolation || echo "flash-attn installation failed, this is normal for some environments"
-
-# 尝试安装 triton
-echo ">>> Attempting to install triton..."
-pip install triton || echo "triton installation failed, continuing..."
+log ">>> Attempting to install flash-attention..."
+pip install flash-attn --no-build-isolation || log_error "flash-attn installation failed (this is normal for some environments)"
 
 # 安装可选的 WD14 tagger 依赖
-echo ">>> Installing optional WD14 tagger dependencies..."
-pip install onnx==1.15.0 onnxruntime-gpu==1.17.1 || echo "ONNX dependencies installation failed, continuing..."
+log ">>> Installing optional WD14 tagger dependencies..."
+pip install onnx==1.15.0 onnxruntime-gpu==1.17.1 || log_error "ONNX dependencies installation failed"
 
 # ========== 模型下载 ==========
-echo "=== Phase 5: Model Downloads ==="
+log "=== Phase 5: Model Downloads ==="
 
 # 返回 workspace 目录
 cd /workspace/
 
 # 创建模型目录
-echo ">>> Creating models directory..."
+log ">>> Creating models directory..."
 mkdir -p /workspace/models
 cd /workspace/models
 
 # 检查 HuggingFace Token
-echo ">>> Checking HuggingFace authentication..."
+log ">>> Checking HuggingFace authentication..."
 if [ -z "$HF_TOKEN" ]; then
-    echo "⚠️  WARNING: HF_TOKEN environment variable not set!"
+    log_error "WARNING: HF_TOKEN environment variable not set!"
     echo "   FLUX.1-dev requires authentication. Please set HF_TOKEN in vast.ai environment variables."
     echo "   To get your token:"
     echo "   1. Create an account at https://huggingface.co"
@@ -171,13 +220,13 @@ if [ -z "$HF_TOKEN" ]; then
     echo ""
     SKIP_AUTH_MODELS=true
 else
-    echo "✓ HF_TOKEN found, configuring authentication..."
+    log "✓ HF_TOKEN found, configuring authentication..."
     # 安装 huggingface-cli
-    pip install -U huggingface_hub
+    pip install -U huggingface_hub || log_error "Failed to update huggingface_hub"
     
     # 登录 HuggingFace
-    huggingface-cli login --token $HF_TOKEN --add-to-git-credential
-    echo "✓ HuggingFace authentication configured"
+    huggingface-cli login --token $HF_TOKEN --add-to-git-credential || log_error "HuggingFace login failed"
+    log "✓ HuggingFace authentication configured"
 fi
 
 # 下载模型函数
@@ -187,35 +236,38 @@ download_model() {
     local require_auth=$3
     
     if [ "$require_auth" = "true" ] && [ "$SKIP_AUTH_MODELS" = "true" ]; then
-        echo "⚠️  Skipping $filename (requires authentication)"
+        log_error "Skipping $filename (requires authentication)"
         return
     fi
     
     if [ -f "$filename" ]; then
-        echo "✓ $filename already exists, skipping download"
+        log "✓ $filename already exists, skipping download"
     else
-        echo "📥 Downloading $filename..."
+        log "📥 Downloading $filename..."
         if [ "$require_auth" = "true" ]; then
             # 使用 huggingface-cli 下载需要认证的文件
             huggingface-cli download --resume-download --local-dir . \
                 $(echo $url | sed 's|https://huggingface.co/||' | sed 's|/resolve/.*||') \
-                $(basename $url) --local-dir-use-symlinks False
+                $(basename $url) --local-dir-use-symlinks False || {
+                log_error "Failed to download $filename"
+                return 1
+            }
             mv $(basename $url) $filename 2>/dev/null || true
         else
             # 使用 wget 下载公开文件
             wget -c -O $filename "$url" || {
-                echo "❌ Failed to download $filename"
+                log_error "Failed to download $filename"
                 rm -f $filename
                 return 1
             }
         fi
-        echo "✓ Successfully downloaded $filename"
+        log "✓ Successfully downloaded $filename"
     fi
 }
 
 # 下载模型文件
-echo ">>> Downloading model files..."
-echo "This may take a while depending on your internet speed..."
+log ">>> Downloading model files..."
+log "This may take a while depending on your internet speed..."
 
 # FLUX.1-dev (需要认证)
 download_model \
@@ -242,7 +294,7 @@ download_model \
     "true"
 
 # 创建模型路径配置文件
-echo ">>> Creating model paths configuration..."
+log ">>> Creating model paths configuration..."
 cat > /workspace/model_paths.txt <<'EOF'
 # Model paths for sd-scripts training
 FLUX_MODEL=/workspace/models/flux1-dev.safetensors
@@ -252,17 +304,17 @@ AE=/workspace/models/ae.safetensors
 EOF
 
 # 显示模型状态
-echo ">>> Model files status:"
+log ">>> Model files status:"
 ls -lah /workspace/models/
 
 # 返回 sd-scripts 目录
 cd /workspace/sd-scripts
 
 # ========== 辅助脚本创建 ==========
-echo "=== Phase 6: Creating Helper Scripts ==="
+log "=== Phase 6: Creating Helper Scripts ==="
 
 # 创建环境激活脚本
-echo ">>> Creating environment activation script..."
+log ">>> Creating environment activation script..."
 cat > /workspace/activate_env.sh <<'EOF'
 #!/bin/bash
 source /workspace/sd-scripts-env/bin/activate
@@ -292,7 +344,7 @@ EOF
 chmod +x /workspace/activate_env.sh
 
 # 创建依赖检查脚本
-echo ">>> Creating dependency check script..."
+log ">>> Creating dependency check script..."
 cat > /workspace/check_dependencies.sh <<'EOF'
 #!/bin/bash
 source /workspace/sd-scripts-env/bin/activate
@@ -366,7 +418,7 @@ EOF
 chmod +x /workspace/check_dependencies.sh
 
 # 创建完整的测试脚本
-echo ">>> Creating installation test script..."
+log ">>> Creating installation test script..."
 cat > /workspace/test_installation.sh <<'EOF'
 #!/bin/bash
 source /workspace/sd-scripts-env/bin/activate
@@ -467,7 +519,7 @@ EOF
 chmod +x /workspace/test_installation.sh
 
 # 创建模型验证脚本
-echo ">>> Creating model verification script..."
+log ">>> Creating model verification script..."
 cat > /workspace/verify_models.sh <<'EOF'
 #!/bin/bash
 source /workspace/sd-scripts-env/bin/activate
@@ -507,7 +559,7 @@ EOF
 chmod +x /workspace/verify_models.sh
 
 # 创建快速训练测试脚本
-echo ">>> Creating quick training test script..."
+log ">>> Creating quick training test script..."
 cat > /workspace/quick_test_training.sh <<'EOF'
 #!/bin/bash
 source /workspace/sd-scripts-env/bin/activate
@@ -533,7 +585,7 @@ EOF
 chmod +x /workspace/quick_test_training.sh
 
 # 创建示例训练命令脚本
-echo ">>> Creating example training commands..."
+log ">>> Creating example training commands..."
 cat > /workspace/example_commands.sh <<'EOF'
 #!/bin/bash
 
@@ -582,7 +634,7 @@ EOF
 chmod +x /workspace/example_commands.sh
 
 # 创建优化的 accelerate 配置
-echo ">>> Creating optimized accelerate configuration..."
+log ">>> Creating optimized accelerate configuration..."
 cat > /workspace/accelerate_config.yaml <<'EOF'
 compute_environment: LOCAL_PROCESS
 distributed_type: 'NO'
@@ -604,9 +656,9 @@ mkdir -p ~/.cache/huggingface/accelerate
 cp /workspace/accelerate_config.yaml ~/.cache/huggingface/accelerate/default_config.yaml
 
 # ========== 环境变量持久化 ==========
-echo "=== Phase 7: Environment Persistence ==="
+log "=== Phase 7: Environment Persistence ==="
 
-echo ">>> Setting up persistent environment variables..."
+log ">>> Setting up persistent environment variables..."
 cat >> /etc/environment <<EOF
 CUDA_HOME=/usr/local/cuda
 PATH=/workspace/sd-scripts-env/bin:/usr/local/cuda/bin:\$PATH
@@ -619,71 +671,71 @@ HF_HOME=/workspace/.cache/huggingface
 EOF
 
 # ========== 最终验证 ==========
-echo "=== Phase 8: Final Verification ==="
+log "=== Phase 8: Final Verification ==="
 
 # 运行依赖检查
-echo ">>> Running dependency compliance check..."
+log ">>> Running dependency compliance check..."
 /workspace/check_dependencies.sh
 
 # 运行安装测试
-echo ">>> Running installation test..."
+log ">>> Running installation test..."
 /workspace/test_installation.sh
 
 # 验证模型文件
-echo ">>> Verifying model files..."
+log ">>> Verifying model files..."
 /workspace/verify_models.sh
 
 # ========== 显示完成信息 ==========
-echo ""
-echo "================================================================================"
-echo "✅ SD-Scripts FLUX.1/SD3 Environment Setup Completed Successfully!"
-echo "================================================================================"
-echo ""
-echo "🎯 Environment Summary:"
-echo "  - Python: $(python --version)"
-echo "  - PyTorch: $(python -c 'import torch; print(torch.__version__)')"
-echo "  - CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
-echo "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except: print("Not available")')"
-echo ""
-echo "📋 Quick Start Commands:"
-echo "  1. Activate environment:    source /workspace/activate_env.sh"
-echo "  2. Check dependencies:      /workspace/check_dependencies.sh"
-echo "  3. Test installation:       /workspace/test_installation.sh"
-echo "  4. Verify models:          /workspace/verify_models.sh"
-echo "  5. Example commands:       /workspace/example_commands.sh"
-echo ""
-echo "🚀 Key Training Scripts:"
-echo "  FLUX.1 LoRA:     flux_train_network.py"
-echo "  FLUX.1 Full:     flux_train.py"
-echo "  SD3 LoRA:        sd3_train_network.py"
-echo "  SD3 Full:        sd3_train.py"
-echo "  Inference:       flux_minimal_inference.py, sd3_minimal_inference.py"
-echo ""
-echo "📦 Model Files (if downloaded):"
-echo "  FLUX.1-dev:  /workspace/models/flux1-dev.safetensors"
-echo "  CLIP-L:      /workspace/models/clip_l.safetensors"
-echo "  T5XXL:       /workspace/models/t5xxl_fp16.safetensors"
-echo "  AE:          /workspace/models/ae.safetensors"
-echo ""
-echo "💡 Performance Tips:"
-echo "  - Use --blocks_to_swap for lower VRAM usage"
-echo "  - DeepSpeed is required for FLUX.1 ControlNet training"
-echo "  - Batch size 1 recommended for 24GB VRAM"
-echo ""
-echo "🔧 Environment Details:"
-echo "  - Virtual env:       /workspace/sd-scripts-env/"
-echo "  - Scripts:          /workspace/sd-scripts/"
-echo "  - Models:           /workspace/models/"
-echo "  - Accelerate config: ~/.cache/huggingface/accelerate/default_config.yaml"
-echo ""
+log ""
+log "================================================================================"
+log "✅ SD-Scripts FLUX.1/SD3 Environment Setup Completed Successfully!"
+log "================================================================================"
+log ""
+log "🎯 Environment Summary:"
+log "  - Python: $(python --version)"
+log "  - PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+log "  - CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+log "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except: print("Not available")')"
+log ""
+log "📋 Quick Start Commands:"
+log "  1. Activate environment:    source /workspace/activate_env.sh"
+log "  2. Check dependencies:      /workspace/check_dependencies.sh"
+log "  3. Test installation:       /workspace/test_installation.sh"
+log "  4. Verify models:          /workspace/verify_models.sh"
+log "  5. Example commands:       /workspace/example_commands.sh"
+log ""
+log "🚀 Key Training Scripts:"
+log "  FLUX.1 LoRA:     flux_train_network.py"
+log "  FLUX.1 Full:     flux_train.py"
+log "  SD3 LoRA:        sd3_train_network.py"
+log "  SD3 Full:        sd3_train.py"
+log "  Inference:       flux_minimal_inference.py, sd3_minimal_inference.py"
+log ""
+log "📦 Model Files (if downloaded):"
+log "  FLUX.1-dev:  /workspace/models/flux1-dev.safetensors"
+log "  CLIP-L:      /workspace/models/clip_l.safetensors"
+log "  T5XXL:       /workspace/models/t5xxl_fp16.safetensors"
+log "  AE:          /workspace/models/ae.safetensors"
+log ""
+log "💡 Performance Tips:"
+log "  - Use --blocks_to_swap for lower VRAM usage"
+log "  - DeepSpeed is required for FLUX.1 ControlNet training"
+log "  - Batch size 1 recommended for 24GB VRAM"
+log ""
+log "🔧 Environment Details:"
+log "  - Virtual env:       /workspace/sd-scripts-env/"
+log "  - Scripts:          /workspace/sd-scripts/"
+log "  - Models:           /workspace/models/"
+log "  - Accelerate config: ~/.cache/huggingface/accelerate/default_config.yaml"
+log ""
 if [ -z "$HF_TOKEN" ]; then
-    echo "⚠️  IMPORTANT: HF_TOKEN not set. Some models may not be downloaded."
+    log_error "⚠️  IMPORTANT: HF_TOKEN not set. Some models may not be downloaded."
     echo "   Please set HF_TOKEN in vast.ai environment variables to download FLUX.1-dev"
 fi
-echo ""
-echo "⏱️  Timing Summary:"
-echo "  Start time: $START_TIME"
-echo "  End time:   $(date)"
-echo ""
-echo "🎉 Ready for FLUX.1/SD3 training!"
-echo "================================================================================" 
+log ""
+log "⏱️  Timing Summary:"
+log "  Start time: $START_TIME"
+log "  End time:   $(date)"
+log ""
+log "🎉 Ready for FLUX.1/SD3 training!"
+log "================================================================================" 
