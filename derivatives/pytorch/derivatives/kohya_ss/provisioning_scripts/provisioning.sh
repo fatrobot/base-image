@@ -2,6 +2,8 @@
 
 # SD-Scripts FLUX.1/SD3 Training Environment Provisioning Script
 # For vast.ai with CUDA 12.4.1 and Ubuntu 22.04
+# Version: 1.1
+# Last updated: 2025-01-22
 
 # 脚本出错时继续执行，记录错误
 set -eo pipefail
@@ -136,7 +138,7 @@ pip install -e . || log_error "Failed to install sd-scripts package"
 
 # 安装与 PyTorch 2.4.0 兼容的 xformers（指定版本避免升级torch）
 log ">>> Installing xformers for PyTorch 2.4.0..."
-pip install xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu124 --no-deps || log_error "Failed to install xformers"
+pip install xformers==0.0.28.post1 --index-url https://download.pytorch.org/whl/cu124 --no-deps || log_error "Failed to install xformers"
 
 # 验证关键依赖版本
 log ">>> Verifying key dependencies versions..."
@@ -178,6 +180,10 @@ try:
 except ImportError as e:
     print(f'torch: Import failed - {e}')
 " || log_error "Dependency verification failed"
+
+# 修复 huggingface_hub 版本冲突
+log ">>> Fixing huggingface_hub version conflict..."
+pip install huggingface_hub==0.24.5 --force-reinstall || log_error "Failed to fix huggingface_hub version"
 
 # 安装 DeepSpeed (README 明确要求的版本)
 log ">>> Installing DeepSpeed (required for FLUX.1/SD3)..."
@@ -310,6 +316,22 @@ ls -lah /workspace/models/
 # 返回 sd-scripts 目录
 cd /workspace/sd-scripts
 
+# 验证核心功能
+log ">>> Verifying core functionality after model download..."
+python -c "
+try:
+    import diffusers
+    print('✓ diffusers import successful')
+except Exception as e:
+    print(f'✗ diffusers import failed: {e}')
+    
+try:
+    from library import train_util
+    print('✓ SD-Scripts library import successful')
+except Exception as e:
+    print(f'✗ SD-Scripts library import failed: {e}')
+" || log_error "Core functionality verification failed"
+
 # ========== 辅助脚本创建 ==========
 log "=== Phase 6: Creating Helper Scripts ==="
 
@@ -332,7 +354,7 @@ echo "Current directory: $(pwd)"
 echo "Python version: $(python --version)"
 echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
 echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
-echo "DeepSpeed available: $(python -c 'try: import deepspeed; print(True); except: print(False)')"
+echo "DeepSpeed available: $(python -c 'try: import deepspeed; print(True); except Exception: print(False)')"
 
 if [ $# -gt 0 ]; then
     exec "$@"
@@ -695,7 +717,7 @@ log "🎯 Environment Summary:"
 log "  - Python: $(python --version)"
 log "  - PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 log "  - CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
-log "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except: print("Not available")')"
+log "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except Exception: print("Not available")')"
 log ""
 log "📋 Quick Start Commands:"
 log "  1. Activate environment:    source /workspace/activate_env.sh"
