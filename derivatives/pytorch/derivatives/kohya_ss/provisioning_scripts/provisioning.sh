@@ -136,9 +136,9 @@ rm temp_requirements.txt
 # 安装项目本身（使用可编辑模式）
 pip install -e . || log_error "Failed to install sd-scripts package"
 
-# 安装与 PyTorch 2.4.0 兼容的 xformers（指定版本避免升级torch）
-log ">>> Installing xformers for PyTorch 2.4.0..."
-pip install xformers==0.0.28.post1 --index-url https://download.pytorch.org/whl/cu124 --no-deps || log_error "Failed to install xformers"
+# 安装与 PyTorch 2.4.0 兼容的 xformers（修复版本匹配）
+log ">>> Installing xformers compatible with PyTorch 2.4.0..."
+pip install xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu124 --no-deps --force-reinstall || log_error "Failed to install compatible xformers"
 
 # 验证关键依赖版本
 log ">>> Verifying key dependencies versions..."
@@ -159,6 +159,9 @@ except ImportError as e:
 try:
     import diffusers
     print(f'diffusers: {diffusers.__version__}')
+    # 测试关键导入
+    from huggingface_hub import cached_download
+    print('✓ cached_download available')
 except ImportError as e:
     print(f'diffusers: Import failed - {e}')
 
@@ -179,11 +182,29 @@ try:
     print(f'torch: {torch.__version__}')
 except ImportError as e:
     print(f'torch: Import failed - {e}')
+
+try:
+    import huggingface_hub
+    print(f'huggingface_hub: {huggingface_hub.__version__}')
+except ImportError as e:
+    print(f'huggingface_hub: Import failed - {e}')
 " || log_error "Dependency verification failed"
 
-# 修复 huggingface_hub 版本冲突
-log ">>> Fixing huggingface_hub version conflict..."
+# 修复 huggingface_hub 版本冲突（关键修复）
+log ">>> Fixing huggingface_hub version conflict (CRITICAL)..."
 pip install huggingface_hub==0.24.5 --force-reinstall || log_error "Failed to fix huggingface_hub version"
+
+# 验证修复结果
+log ">>> Verifying huggingface_hub fix..."
+python -c "
+try:
+    from huggingface_hub import cached_download
+    print('✓ cached_download import successful')
+    import huggingface_hub
+    print(f'✓ huggingface_hub version: {huggingface_hub.__version__}')
+except Exception as e:
+    print(f'✗ huggingface_hub fix failed: {e}')
+" || log_error "HuggingFace Hub fix verification failed"
 
 # 安装 DeepSpeed (README 明确要求的版本)
 log ">>> Installing DeepSpeed (required for FLUX.1/SD3)..."
@@ -227,8 +248,8 @@ if [ -z "$HF_TOKEN" ]; then
     SKIP_AUTH_MODELS=true
 else
     log "✓ HF_TOKEN found, configuring authentication..."
-    # 安装 huggingface-cli
-    pip install -U huggingface_hub || log_error "Failed to update huggingface_hub"
+    # 重要：不升级huggingface_hub，保持与diffusers兼容的版本
+    # pip install -U huggingface_hub || log_error "Failed to update huggingface_hub"
     
     # 登录 HuggingFace
     huggingface-cli login --token $HF_TOKEN --add-to-git-credential || log_error "HuggingFace login failed"
@@ -717,7 +738,7 @@ log "🎯 Environment Summary:"
 log "  - Python: $(python --version)"
 log "  - PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 log "  - CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
-log "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except Exception: print("Not available")')"
+log "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except Exception: print(\"Not available\")')"
 log ""
 log "📋 Quick Start Commands:"
 log "  1. Activate environment:    source /workspace/activate_env.sh"
