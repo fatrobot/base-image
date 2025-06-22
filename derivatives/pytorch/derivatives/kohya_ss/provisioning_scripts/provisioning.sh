@@ -2,7 +2,7 @@
 
 # SD-Scripts FLUX.1/SD3 Training Environment Provisioning Script (Stable Version)
 # For vast.ai with CUDA 12.4.1 and Ubuntu 22.04 Python 3.10
-# Version: 2.3 (Fixed wget authentication)
+# Version: 2.3.1 (Fixed ae.safetensors URL)
 # Last updated: 2025-01-23
 
 # 严格错误处理 - 出错即停止
@@ -199,7 +199,7 @@ verify_venv_activated() {
 
 # 开始执行
 log "=== SD-Scripts FLUX.1/SD3 Training Environment Setup ==="
-log "Version: 2.3 (Fixed wget authentication)"
+log "Version: 2.3.1 (Fixed ae.safetensors URL)"
 log "Log file: $LOG_FILE"
 
 START_TIME=$(date)
@@ -369,7 +369,7 @@ else
         "flux1-dev.safetensors|https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors|auth"
         "clip_l.safetensors|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors|"
         "t5xxl_fp16.safetensors|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors|"
-        "ae.safetensors|https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors|"
+        "ae.safetensors|https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors|auth"
     )
     
     # 串行下载（避免并发问题）
