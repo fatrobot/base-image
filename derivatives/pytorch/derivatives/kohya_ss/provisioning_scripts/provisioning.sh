@@ -727,9 +727,9 @@ EOF
 
 # 只有当 tcmalloc 存在时才添加 LD_PRELOAD 到 /etc/environment
 if [ -f "/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4" ]; then
-    echo 'LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"' >> /etc/environment
+    echo 'LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4' >> /etc/environment
 elif [ -f "/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4" ]; then
-    echo 'LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4:$LD_PRELOAD"' >> /etc/environment
+    echo 'LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4' >> /etc/environment
 fi
 
 # ========== 最终验证 ==========
