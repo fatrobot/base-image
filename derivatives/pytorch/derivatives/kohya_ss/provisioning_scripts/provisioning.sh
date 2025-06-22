@@ -61,8 +61,16 @@ apt-get install -y \
 
 # 设置内存优化
 log ">>> Setting up memory optimization..."
-export LD_PRELOAD=libtcmalloc.so.4:$LD_PRELOAD
-echo 'export LD_PRELOAD=libtcmalloc.so.4:$LD_PRELOAD' >> /etc/environment
+# 检查 libtcmalloc 是否存在，如果存在才设置 LD_PRELOAD
+if [ -f "/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4" ]; then
+    export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"
+    log "✓ tcmalloc memory optimization enabled"
+elif [ -f "/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4" ]; then
+    export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4:$LD_PRELOAD"
+    log "✓ tcmalloc memory optimization enabled"
+else
+    log_error "⚠ tcmalloc not found, skipping memory optimization"
+fi
 
 # 验证 CUDA 环境
 log ">>> Verifying CUDA environment..."
@@ -712,11 +720,17 @@ CUDA_HOME=/usr/local/cuda
 PATH=/workspace/sd-scripts-env/bin:/usr/local/cuda/bin:\$PATH
 LD_LIBRARY_PATH=/usr/local/cuda/lib64:\$LD_LIBRARY_PATH
 PYTHONPATH=/workspace/sd-scripts:\$PYTHONPATH
-LD_PRELOAD=libtcmalloc.so.4:\$LD_PRELOAD
 TORCH_CUDA_ARCH_LIST="6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 HF_HOME=/workspace/.cache/huggingface
 EOF
+
+# 只有当 tcmalloc 存在时才添加 LD_PRELOAD 到 /etc/environment
+if [ -f "/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4" ]; then
+    echo 'LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"' >> /etc/environment
+elif [ -f "/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4" ]; then
+    echo 'LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4:$LD_PRELOAD"' >> /etc/environment
+fi
 
 # ========== 最终验证 ==========
 log "=== Phase 8: Final Verification ==="
