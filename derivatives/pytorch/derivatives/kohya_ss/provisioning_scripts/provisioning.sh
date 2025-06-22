@@ -743,7 +743,15 @@ log "🎯 Environment Summary:"
 log "  - Python: $(python --version)"
 log "  - PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 log "  - CUDA Available: $(python -c 'import torch; print(torch.cuda.is_available())')"
-log "  - DeepSpeed: $(python -c 'try: import deepspeed; print(deepspeed.__version__); except Exception: print(\"Not available\")')"
+DEEPSPEED_VER=$(python - <<'PY'
+try:
+    import deepspeed
+    print(deepspeed.__version__, end='')
+except Exception:
+    print("Not available", end='')
+PY
+)
+log "  - DeepSpeed: $DEEPSPEED_VER"
 log ""
 log "📋 Quick Start Commands:"
 log "  1. Activate environment:    source /workspace/activate_env.sh"
