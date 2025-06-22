@@ -2,7 +2,7 @@
 
 # SD-Scripts FLUX.1/SD3 Training Environment Provisioning Script (Stable Version)
 # For vast.ai with CUDA 12.4.1 and Ubuntu 22.04 Python 3.10
-# Version: 2.2 (Security & Robustness Enhanced)
+# Version: 2.3 (Fixed wget authentication)
 # Last updated: 2025-01-23
 
 # 严格错误处理 - 出错即停止
@@ -51,7 +51,7 @@ handle_error() {
 cleanup_on_error() {
     log "Cleaning up temporary files..."
     find "${WORKSPACE_DIR}/${MODELS_DIR}" -name "*.tmp" -o -name "*.part" -delete 2>/dev/null || true
-    rm -f ~/.wgetrc_tmp 2>/dev/null || true
+    rm -f ~/.wget-hf-auth 2>/dev/null || true
 }
 
 # 设置错误处理
@@ -81,7 +81,7 @@ check_disk_space() {
     log_success "Disk space check passed. Available: ${available_gb}GB"
 }
 
-# 安全的下载函数
+# 安全的下载函数（修复认证问题）
 download_with_retry() {
     local url=$1
     local output=$2
@@ -104,16 +104,18 @@ download_with_retry() {
             temp_file="$output.part"
         fi
         
-        # 使用临时配置文件传递认证信息（更安全）
+        # 处理认证（修复：直接使用 --header 参数）
         if [ -n "$auth_token" ]; then
-            echo "header = Authorization: Bearer $auth_token" > ~/.wgetrc_tmp
-            wget_cmd="$wget_cmd --config ~/.wgetrc_tmp"
+            # 方法1：使用 --header 参数（推荐）
+            wget_cmd="$wget_cmd --header=\"Authorization: Bearer $auth_token\""
+            
+            # 如果需要调试，打印脱敏的命令
+            log "Debug: wget command with auth token (token hidden)"
         fi
         
-        # 执行下载
-        if $wget_cmd "$url" -O "$temp_file" 2>&1 | tee -a "$LOG_FILE"; then
+        # 执行下载（使用 eval 处理包含空格的参数）
+        if eval "$wget_cmd \"$url\" -O \"$temp_file\"" 2>&1 | tee -a "$LOG_FILE"; then
             mv "$temp_file" "$output"
-            rm -f ~/.wgetrc_tmp 2>/dev/null || true
             return 0
         fi
         
@@ -124,9 +126,41 @@ download_with_retry() {
         fi
     done
     
-    rm -f ~/.wgetrc_tmp "$temp_file" 2>/dev/null || true
+    rm -f "$temp_file" 2>/dev/null || true
     log_error "Failed to download $url after $max_retries attempts"
     return 1
+}
+
+# 备用下载函数（使用curl）
+download_with_curl() {
+    local url=$1
+    local output=$2
+    local auth_token=${3:-}
+    
+    log "Trying download with curl..."
+    
+    local curl_cmd="curl -L --progress-bar"
+    
+    # 如果有认证token
+    if [ -n "$auth_token" ]; then
+        curl_cmd="$curl_cmd -H \"Authorization: Bearer $auth_token\""
+    fi
+    
+    # 如果文件部分存在，尝试续传
+    if [ -f "$output.part" ]; then
+        curl_cmd="$curl_cmd -C -"
+        output="$output.part"
+    fi
+    
+    if eval "$curl_cmd \"$url\" -o \"$output\"" 2>&1 | tee -a "$LOG_FILE"; then
+        # 如果是.part文件，重命名
+        if [[ "$output" == *.part ]]; then
+            mv "$output" "${output%.part}"
+        fi
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Python包验证函数
@@ -165,7 +199,7 @@ verify_venv_activated() {
 
 # 开始执行
 log "=== SD-Scripts FLUX.1/SD3 Training Environment Setup ==="
-log "Version: 2.2 (Security & Robustness Enhanced)"
+log "Version: 2.3 (Fixed wget authentication)"
 log "Log file: $LOG_FILE"
 
 START_TIME=$(date)
@@ -318,7 +352,16 @@ mkdir -p "$MODELS_DIR"
 if [ -z "${HF_TOKEN:-}" ]; then
     log_warning "HF_TOKEN not found, skipping model download"
 else
-    log ">>> Downloading models..."
+    log ">>> HF_TOKEN found, downloading FLUX.1 models..."
+    log ">>> Testing HF_TOKEN validity..."
+    
+    # 测试token是否有效
+    if curl -s -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/whoami > /dev/null 2>&1; then
+        log_success "HF_TOKEN is valid"
+    else
+        log_warning "HF_TOKEN might be invalid or expired, downloads may fail"
+    fi
+    
     cd "$MODELS_DIR"
     
     # 模型列表（保持顺序）
@@ -338,13 +381,21 @@ else
             continue
         fi
         
+        # 先尝试wget，如果失败则尝试curl
         if [ "$auth_flag" = "auth" ]; then
-            download_with_retry "$url" "$name" "$HF_TOKEN" || log_warning "Failed: $name"
+            if ! download_with_retry "$url" "$name" "$HF_TOKEN"; then
+                log_warning "wget failed, trying curl..."
+                download_with_curl "$url" "$name" "$HF_TOKEN" || log_warning "Failed: $name"
+            fi
         else
-            download_with_retry "$url" "$name" || log_warning "Failed: $name"
+            if ! download_with_retry "$url" "$name"; then
+                log_warning "wget failed, trying curl..."
+                download_with_curl "$url" "$name" || log_warning "Failed: $name"
+            fi
         fi
     done
     
+    log ">>> Model download phase completed."
     ls -lah . | tee -a "$LOG_FILE"
 fi
 
