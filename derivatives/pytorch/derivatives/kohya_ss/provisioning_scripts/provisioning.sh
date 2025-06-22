@@ -138,7 +138,12 @@ pip install -e . || log_error "Failed to install sd-scripts package"
 
 # 安装与 PyTorch 2.4.0 兼容的 xformers（修复版本匹配）
 log ">>> Installing xformers compatible with PyTorch 2.4.0..."
-pip install xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu124 --no-deps --force-reinstall || log_error "Failed to install compatible xformers"
+# 优先尝试 0.0.28.post1（有官方 cu124 轮子，依赖 torch==2.4.1，但我们使用 --no-deps 避免升级）
+if ! pip install xformers==0.0.28.post1 --index-url https://download.pytorch.org/whl/cu124 --no-deps --force-reinstall; then
+    log_error "xformers 0.0.28.post1 wheel not available, falling back to source build"
+    # 使用源码安装（可能耗时较长），仍然 --no-deps 避免依赖冲突
+    pip install xformers==0.0.28.post3 --no-binary xformers --no-deps || log_error "Failed to build xformers from source"
+fi
 
 # 验证关键依赖版本
 log ">>> Verifying key dependencies versions..."
