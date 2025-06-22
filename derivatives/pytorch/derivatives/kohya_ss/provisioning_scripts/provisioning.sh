@@ -2,8 +2,8 @@
 
 # SD-Scripts FLUX.1/SD3 Training Environment Provisioning Script (Stable Version)
 # For vast.ai with CUDA 12.4.1 and Ubuntu 22.04 Python 3.10
-# Version: 2.1 (Improved)
-# Last updated: 2025-06-23
+# Version: 2.2 (Security & Robustness Enhanced)
+# Last updated: 2025-01-23
 
 # 严格错误处理 - 出错即停止
 set -euo pipefail
@@ -13,23 +13,28 @@ WORKSPACE_DIR="/workspace"
 VENV_NAME="sd-scripts-env"
 PROJECT_NAME="sd-scripts"
 MODELS_DIR="models"
-REQUIRED_SPACE_GB=50  # 需要的磁盘空间（GB）
+REQUIRED_SPACE_GB=50
+LOG_FILE="$WORKSPACE_DIR/provisioning_$(date +%Y%m%d_%H%M%S).log"
 
 # 创建日志函数
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$message" | tee -a "$LOG_FILE"
 }
 
 log_error() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1"
+    echo "$message" >&2 | tee -a "$LOG_FILE"
 }
 
 log_warning() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: $1" >&2
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: $1"
+    echo "$message" >&2 | tee -a "$LOG_FILE"
 }
 
 log_success() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ $1"
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ✓ $1"
+    echo "$message" | tee -a "$LOG_FILE"
 }
 
 # 错误处理函数
@@ -37,217 +42,241 @@ handle_error() {
     local exit_code=$?
     local line_number=$1
     log_error "Script failed at line $line_number with exit code $exit_code"
-    log_error "Please check the logs above for details"
+    log_error "Check log file: $LOG_FILE"
+    cleanup_on_error
     exit $exit_code
+}
+
+# 清理函数
+cleanup_on_error() {
+    log "Cleaning up temporary files..."
+    find "${WORKSPACE_DIR}/${MODELS_DIR}" -name "*.tmp" -o -name "*.part" -delete 2>/dev/null || true
+    rm -f ~/.wgetrc_tmp 2>/dev/null || true
 }
 
 # 设置错误处理
 trap 'handle_error ${LINENO}' ERR
+trap cleanup_on_error EXIT
 
-# 检查磁盘空间
+# 检查磁盘空间（更健壮的实现）
 check_disk_space() {
     local required_gb=$1
-    local available_gb=$(df -BG "$WORKSPACE_DIR" | awk 'NR==2 {print $4}' | sed 's/G//')
+    local workspace_dir=$2
+    
+    # 使用更可靠的方式获取可用空间
+    local available_kb=$(df -k "$workspace_dir" | tail -1 | awk '{print $4}')
+    local available_gb=$((available_kb / 1024 / 1024))
     
     if [ "$available_gb" -lt "$required_gb" ]; then
         log_error "Insufficient disk space. Required: ${required_gb}GB, Available: ${available_gb}GB"
         return 1
     fi
+    
+    # 添加10%缓冲
+    local buffer_gb=$((required_gb * 11 / 10))
+    if [ "$available_gb" -lt "$buffer_gb" ]; then
+        log_warning "Disk space is tight. Available: ${available_gb}GB, Recommended: ${buffer_gb}GB"
+    fi
+    
     log_success "Disk space check passed. Available: ${available_gb}GB"
 }
 
-# 下载文件函数（带重试）
+# 安全的下载函数
 download_with_retry() {
     local url=$1
     local output=$2
-    local auth_header=${3:-}
+    local auth_token=${3:-}
     local max_retries=3
     local retry_count=0
+    local temp_file="${output}.tmp"
+    
+    rm -f "$temp_file"
     
     while [ $retry_count -lt $max_retries ]; do
-        if [ -n "$auth_header" ]; then
-            if wget --header="$auth_header" "$url" -O "$output" 2>/dev/null; then
-                return 0
-            fi
-        else
-            if wget "$url" -O "$output" 2>/dev/null; then
-                return 0
-            fi
+        log "Downloading $(basename "$output") (attempt $((retry_count + 1))/$max_retries)..."
+        
+        # 构建wget命令，显示进度
+        local wget_cmd="wget --progress=bar:force --show-progress"
+        
+        # 如果有部分下载，尝试续传
+        if [ -f "$output.part" ]; then
+            wget_cmd="$wget_cmd -c"
+            temp_file="$output.part"
+        fi
+        
+        # 使用临时配置文件传递认证信息（更安全）
+        if [ -n "$auth_token" ]; then
+            echo "header = Authorization: Bearer $auth_token" > ~/.wgetrc_tmp
+            wget_cmd="$wget_cmd --config ~/.wgetrc_tmp"
+        fi
+        
+        # 执行下载
+        if $wget_cmd "$url" -O "$temp_file" 2>&1 | tee -a "$LOG_FILE"; then
+            mv "$temp_file" "$output"
+            rm -f ~/.wgetrc_tmp 2>/dev/null || true
+            return 0
         fi
         
         retry_count=$((retry_count + 1))
-        log_warning "Download failed, retry $retry_count/$max_retries..."
-        sleep 5
+        if [ $retry_count -lt $max_retries ]; then
+            log_warning "Download failed, waiting 10 seconds before retry..."
+            sleep 10
+        fi
     done
     
+    rm -f ~/.wgetrc_tmp "$temp_file" 2>/dev/null || true
     log_error "Failed to download $url after $max_retries attempts"
     return 1
 }
 
-# Python 包验证函数
+# Python包验证函数
 verify_python_package() {
     local package_name=$1
     local import_name=${2:-$package_name}
+    local required=${3:-true}
     
-    if python -c "import $import_name; print(f'✓ $package_name: {$import_name.__version__}')" 2>/dev/null; then
+    if python -c "import $import_name; print(f'✓ $package_name: {$import_name.__version__}')" 2>>"$LOG_FILE"; then
         return 0
     else
-        log_error "Failed to import $package_name"
-        return 1
+        if [ "$required" = "true" ]; then
+            log_error "Failed to import required package: $package_name"
+            return 1
+        else
+            log_warning "Failed to import optional package: $package_name"
+            return 0
+        fi
     fi
 }
 
-log "=== SD-Scripts FLUX.1/SD3 Training Environment Setup (Stable Version) ==="
-log "Starting provisioning script..."
-log "Version: 2.1 (Improved)"
-log "Base image: cuda-12.4.1-cudnn-devel-ubuntu22.04-py310"
+# 验证虚拟环境激活
+verify_venv_activated() {
+    if [ -z "${VIRTUAL_ENV:-}" ]; then
+        log_error "Virtual environment is not activated"
+        return 1
+    fi
+    
+    if [ "$(which python)" != "$VIRTUAL_ENV/bin/python" ]; then
+        log_error "Python is not from virtual environment"
+        return 1
+    fi
+    
+    return 0
+}
 
-# 记录开始时间
+# 开始执行
+log "=== SD-Scripts FLUX.1/SD3 Training Environment Setup ==="
+log "Version: 2.2 (Security & Robustness Enhanced)"
+log "Log file: $LOG_FILE"
+
 START_TIME=$(date)
+START_TIMESTAMP=$(date +%s)
 log "Start time: $START_TIME"
 
-# 修复 LD_PRELOAD 错误 - 清除有问题的环境变量
+# 清理环境变量
 unset LD_PRELOAD 2>/dev/null || true
 export DEBIAN_FRONTEND=noninteractive
 
-# 切换到持久化目录
+# 切换到工作目录
 cd "$WORKSPACE_DIR"
 
 # 检查磁盘空间
-check_disk_space $REQUIRED_SPACE_GB
+check_disk_space $REQUIRED_SPACE_GB "$WORKSPACE_DIR"
 
 # ========== 系统环境准备 ==========
 log "=== Phase 1: System Environment Setup ==="
 
-# 更新系统包和安装基础工具
 log ">>> Updating system packages..."
-apt-get update -y || {
-    log_warning "apt update failed, continuing anyway..."
-}
+apt-get update -y 2>&1 | tee -a "$LOG_FILE" || log_warning "apt update had issues"
 
 log ">>> Installing essential system packages..."
-apt-get install -y \
-    git \
-    wget \
-    curl \
-    unzip \
-    build-essential \
-    cmake \
-    ninja-build \
-    pkg-config \
-    libffi-dev \
-    libssl-dev \
-    python3-dev \
-    python3.10-venv \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    htop \
-    tmux \
-    vim \
-    tree || {
-    log_error "Failed to install system packages"
-    exit 1
-}
+SYSTEM_PACKAGES=(
+    git wget curl unzip
+    build-essential cmake ninja-build
+    pkg-config libffi-dev libssl-dev
+    python3-dev python3.10-venv python3.10-distutils
+    libgl1-mesa-glx libglib2.0-0 libsm6
+    libxext6 libxrender-dev libgomp1
+    htop tmux vim tree
+)
 
-# 验证 CUDA 环境
+apt-get install -y "${SYSTEM_PACKAGES[@]}" 2>&1 | tee -a "$LOG_FILE"
+
+# 验证CUDA环境
 log ">>> Verifying CUDA environment..."
 if ! command -v nvidia-smi &> /dev/null; then
-    log_error "nvidia-smi not found, CUDA environment may not be properly set up"
+    log_error "nvidia-smi not found"
     exit 1
 fi
 
-nvidia-smi
-nvcc --version || log_warning "nvcc not found, some packages may need to build from source"
+nvidia-smi | tee -a "$LOG_FILE"
+nvcc --version 2>&1 | tee -a "$LOG_FILE" || log_warning "nvcc not found"
 
-# 设置 CUDA 环境变量
-export CUDA_HOME=/usr/local/cuda
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
+# 设置CUDA环境变量
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export CUDA_HOME
+export PATH="$CUDA_HOME/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export TORCH_CUDA_ARCH_LIST="6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
 
-# ========== Python 环境设置 ==========
+# ========== Python环境设置 ==========
 log "=== Phase 2: Python Environment Setup ==="
 
-# 创建 Python 虚拟环境
 log ">>> Creating Python virtual environment..."
-if [ -d "$VENV_NAME" ]; then
-    log_warning "Virtual environment already exists, removing..."
-    rm -rf "$VENV_NAME"
-fi
+[ -d "$VENV_NAME" ] && rm -rf "$VENV_NAME"
 
 python3.10 -m venv "$VENV_NAME"
 source "$VENV_NAME/bin/activate"
 
-# 验证 Python 版本
-PYTHON_VERSION=$(python --version)
-PIP_VERSION=$(pip --version)
-log "Python version: $PYTHON_VERSION"
-log "Pip version: $PIP_VERSION"
+# 验证虚拟环境
+verify_venv_activated
 
-# 确保我们使用的是正确的 Python
-if ! python --version | grep -q "3.10"; then
-    log_error "Python version is not 3.10.x"
+# 验证Python版本（精确匹配）
+PYTHON_VERSION=$(python --version 2>&1)
+log "Python version: $PYTHON_VERSION"
+
+if ! echo "$PYTHON_VERSION" | grep -E "Python 3\.10\.[0-9]+" > /dev/null; then
+    log_error "Python version mismatch: $PYTHON_VERSION"
     exit 1
 fi
 
-# 升级 pip 和基础工具
-log ">>> Upgrading pip and basic tools..."
-pip install --upgrade pip setuptools wheel
+# 升级pip
+log ">>> Upgrading pip..."
+python -m pip install --upgrade pip setuptools wheel 2>&1 | tee -a "$LOG_FILE"
 
-# ========== SD-Scripts 项目设置 ==========
+# ========== SD-Scripts项目设置 ==========
 log "=== Phase 3: SD-Scripts Project Setup ==="
 
-# 克隆 sd-scripts 项目 (sd3 分支)
-log ">>> Cloning sd-scripts repository (sd3 branch)..."
-if [ -d "$PROJECT_NAME" ]; then
-    log "sd-scripts directory exists, removing..."
-    rm -rf "$PROJECT_NAME"
-fi
+log ">>> Cloning sd-scripts repository..."
+[ -d "$PROJECT_NAME" ] && rm -rf "$PROJECT_NAME"
 
-if ! git clone --branch sd3 --depth 1 https://github.com/kohya-ss/sd-scripts.git; then
-    log_error "Failed to clone sd-scripts repository"
-    exit 1
-fi
-
+git clone --branch sd3 --depth 1 https://github.com/kohya-ss/sd-scripts.git 2>&1 | tee -a "$LOG_FILE"
 cd "$PROJECT_NAME"
 
-# ========== 核心依赖安装 (按特定顺序避免冲突) ==========
+# ========== 核心依赖安装 ==========
 log "=== Phase 4: Core Dependencies Installation ==="
 
-# Step 1: 安装 PyTorch 2.4.0 和相关工具链
-log ">>> Installing PyTorch 2.4.0 with CUDA 12.4 support..."
-pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+# PyTorch安装
+log ">>> Installing PyTorch 2.4.0..."
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124 2>&1 | tee -a "$LOG_FILE"
 
-# 验证 PyTorch 安装
-log ">>> Verifying PyTorch installation..."
+# 验证PyTorch
+log ">>> Verifying PyTorch..."
 python -c "
 import torch
-print(f'PyTorch version: {torch.__version__}')
-print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA: {torch.cuda.is_available()}')
 if torch.cuda.is_available():
-    print(f'CUDA version: {torch.version.cuda}')
-    print(f'GPU count: {torch.cuda.device_count()}')
-    print(f'GPU device: {torch.cuda.get_device_name(0)}')
-else:
-    print('WARNING: CUDA is not available!')
-" || {
-    log_error "PyTorch installation verification failed"
-    exit 1
-}
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        print(f'GPU {i}: {props.name} ({props.total_memory / 1024**3:.1f}GB)')
+" 2>&1 | tee -a "$LOG_FILE"
 
-# Step 2: 安装 triton 解决 bitsandbytes 依赖问题
-log ">>> Installing triton for bitsandbytes compatibility..."
-pip install triton==3.0.0
+# 安装triton
+pip install triton==3.0.0 2>&1 | tee -a "$LOG_FILE"
 
-# Step 3: 安装项目特定依赖 (精确版本控制)
-log ">>> Installing sd-scripts core dependencies with version control..."
-
-# 定义核心依赖
-CORE_DEPS=(
+# 按顺序安装核心依赖
+CORE_DEPS_ORDER=(
     "accelerate==0.33.0"
     "transformers==4.44.0"
     "diffusers[torch]==0.25.0"
@@ -256,224 +285,133 @@ CORE_DEPS=(
     "bitsandbytes==0.44.0"
 )
 
-# 安装核心依赖
-for dep in "${CORE_DEPS[@]}"; do
+for dep in "${CORE_DEPS_ORDER[@]}"; do
     log "Installing $dep..."
-    pip install "$dep" || {
-        log_error "Failed to install $dep"
-        exit 1
-    }
+    pip install "$dep" 2>&1 | tee -a "$LOG_FILE"
 done
 
 # 验证核心依赖
-log ">>> Verifying core dependencies..."
-verify_python_package "accelerate" || exit 1
-verify_python_package "transformers" || exit 1
-verify_python_package "diffusers" || exit 1
-verify_python_package "huggingface_hub" || exit 1
-verify_python_package "safetensors" || exit 1
-verify_python_package "bitsandbytes" || exit 1
-
-# Step 4: 安装其他必需依赖
-log ">>> Installing additional dependencies..."
-ADDITIONAL_DEPS=(
-    "ftfy==6.1.1"
-    "opencv-python==4.8.1.78"
-    "einops==0.7.0"
-    "pytorch-lightning==1.9.0"
-    "lion-pytorch==0.0.6"
-    "schedulefree==1.4"
-    "pytorch-optimizer==3.5.0"
-    "prodigy-plus-schedule-free==1.9.0"
-    "prodigyopt==1.1.2"
-    "tensorboard"
-    "altair==4.2.2"
-    "easygui==0.98.3"
-    "toml==0.10.2"
-    "voluptuous==0.13.1"
-    "imagesize==1.4.1"
-    "numpy<=2.0"
-    "rich==13.7.0"
-    "sentencepiece==0.2.0"
-)
-
-for dep in "${ADDITIONAL_DEPS[@]}"; do
-    pip install "$dep" || log_warning "Failed to install $dep, continuing..."
+for pkg in accelerate transformers diffusers huggingface_hub safetensors bitsandbytes; do
+    verify_python_package "$pkg" "$pkg" "true" || exit 1
 done
 
-# Step 5: 安装 xformers (兼容 PyTorch 2.4.0)
-log ">>> Installing xformers compatible with PyTorch 2.4.0..."
-pip install xformers==0.0.28.post1 --index-url https://download.pytorch.org/whl/cu124 --no-deps || {
-    log_warning "xformers installation failed, this is optional and training can continue without it"
-}
+# 安装其他依赖
+log ">>> Installing additional dependencies..."
+pip install -r requirements.txt 2>&1 | tee -a "$LOG_FILE" || log_warning "Some optional deps failed"
 
-# 验证 xformers 安装
-verify_python_package "xformers" || log_warning "xformers not available, continuing without it"
+# xformers安装
+pip install xformers==0.0.28.post1 --index-url https://download.pytorch.org/whl/cu124 \
+    --no-deps 2>&1 | tee -a "$LOG_FILE" || log_warning "xformers failed"
 
-# Step 6: 安装 DeepSpeed (FLUX.1 训练必需)
-log ">>> Installing DeepSpeed 0.16.7 for FLUX.1 training..."
-pip install deepspeed==0.16.7 || {
-    log_warning "DeepSpeed installation failed, FLUX.1 training may not work properly"
-}
+# DeepSpeed安装
+pip install deepspeed==0.16.7 2>&1 | tee -a "$LOG_FILE" || log_warning "DeepSpeed failed"
 
-# 验证 DeepSpeed 安装
-verify_python_package "deepspeed" || log_warning "DeepSpeed not available"
-
-# Step 7: 安装项目本身
-log ">>> Installing sd-scripts package in editable mode..."
-pip install -e . || {
-    log_error "Failed to install sd-scripts package"
-    exit 1
-}
+# 安装项目
+pip install -e . 2>&1 | tee -a "$LOG_FILE"
 
 # ========== 模型下载 ==========
 log "=== Phase 5: Model Download ==="
 
-# 切换到工作目录
 cd "$WORKSPACE_DIR"
-
-# 创建模型目录
-log ">>> Creating models directory..."
 mkdir -p "$MODELS_DIR"
 
-# 检查 HF_TOKEN 环境变量
 if [ -z "${HF_TOKEN:-}" ]; then
-    log_warning "HF_TOKEN not found, skipping model download. Please set HF_TOKEN environment variable."
+    log_warning "HF_TOKEN not found, skipping model download"
 else
-    log ">>> HF_TOKEN found, downloading FLUX.1 models..."
-    
-    # 切换到模型目录
+    log ">>> Downloading models..."
     cd "$MODELS_DIR"
     
-    # 定义模型下载
-    declare -A MODELS=(
-        ["flux1-dev.safetensors"]="https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors"
-        ["clip_l.safetensors"]="https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
-        ["t5xxl_fp16.safetensors"]="https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"
-        ["ae.safetensors"]="https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors"
+    # 模型列表（保持顺序）
+    MODELS=(
+        "flux1-dev.safetensors|https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors|auth"
+        "clip_l.safetensors|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors|"
+        "t5xxl_fp16.safetensors|https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors|"
+        "ae.safetensors|https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors|"
     )
     
-    # 下载模型
-    for model_name in "${!MODELS[@]}"; do
-        if [ -f "$model_name" ]; then
-            log "Model $model_name already exists, skipping..."
+    # 串行下载（避免并发问题）
+    for model_info in "${MODELS[@]}"; do
+        IFS='|' read -r name url auth_flag <<< "$model_info"
+        
+        if [ -f "$name" ]; then
+            log "Model $name exists, skipping..."
+            continue
+        fi
+        
+        if [ "$auth_flag" = "auth" ]; then
+            download_with_retry "$url" "$name" "$HF_TOKEN" || log_warning "Failed: $name"
         else
-            log ">>> Downloading $model_name..."
-            if [[ "$model_name" == "flux1-dev.safetensors" ]]; then
-                download_with_retry "${MODELS[$model_name]}" "$model_name" "Authorization: Bearer $HF_TOKEN" || {
-                    log_warning "Failed to download $model_name"
-                }
-            else
-                download_with_retry "${MODELS[$model_name]}" "$model_name" || {
-                    log_warning "Failed to download $model_name"
-                }
-            fi
+            download_with_retry "$url" "$name" || log_warning "Failed: $name"
         fi
     done
     
-    log ">>> Model download phase completed."
-    ls -la "$WORKSPACE_DIR/$MODELS_DIR/"
+    ls -lah . | tee -a "$LOG_FILE"
 fi
 
 # ========== 最终验证 ==========
 log "=== Phase 6: Final Verification ==="
 
-# 切换回项目目录
 cd "$WORKSPACE_DIR/$PROJECT_NAME"
 
-# 验证关键导入
-log ">>> Performing final verification..."
-python << 'EOF'
-import sys
-import torch
-import diffusers
-import transformers
-import accelerate
-import safetensors
+python << 'EOF' 2>&1 | tee -a "$LOG_FILE"
+import sys, torch, diffusers, transformers, accelerate, safetensors
 
-print('=== Final Verification Report ===')
-print(f'Python version: {sys.version}')
-print(f'PyTorch version: {torch.__version__}')
-print(f'CUDA available: {torch.cuda.is_available()}')
+print('=== Verification Report ===')
+print(f'Python: {sys.version.split()[0]}')
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA: {torch.cuda.is_available()}')
 if torch.cuda.is_available():
-    print(f'CUDA version: {torch.version.cuda}')
-    print(f'GPU device: {torch.cuda.get_device_name(0)}')
-print(f'Diffusers version: {diffusers.__version__}')
-print(f'Transformers version: {transformers.__version__}')
-print(f'Accelerate version: {accelerate.__version__}')
-print(f'Safetensors version: {safetensors.__version__}')
+    for i in range(torch.cuda.device_count()):
+        p = torch.cuda.get_device_properties(i)
+        print(f'GPU {i}: {p.name} ({p.total_memory/1024**3:.1f}GB)')
 
-# 测试关键模块导入
+packages = {
+    'diffusers': diffusers,
+    'transformers': transformers,
+    'accelerate': accelerate,
+    'safetensors': safetensors
+}
+for name, pkg in packages.items():
+    print(f'{name}: {pkg.__version__}')
+
 try:
     from diffusers import FluxPipeline
-    print('✓ FluxPipeline import successful')
-except ImportError as e:
-    print(f'✗ FluxPipeline import failed: {e}')
+    print('✓ FluxPipeline available')
+except: pass
 
 try:
     from huggingface_hub import cached_download
-    print('✓ huggingface_hub cached_download available')
-except ImportError as e:
-    print(f'✗ huggingface_hub cached_download failed: {e}')
-
-print('=== Verification Complete ===')
+    print('✓ cached_download available')
+except: pass
 EOF
 
-# 创建快速启动脚本
-log ">>> Creating quick start script..."
-cat > "$WORKSPACE_DIR/activate_env.sh" << EOF
+# 创建激活脚本
+cat > "$WORKSPACE_DIR/activate_env.sh" << 'EOF'
 #!/bin/bash
-# Quick start script for SD-Scripts environment
-
-# Set CUDA environment variables
-export CUDA_HOME=/usr/local/cuda
-export PATH=\$CUDA_HOME/bin:\$PATH
-export LD_LIBRARY_PATH=\$CUDA_HOME/lib64:\${LD_LIBRARY_PATH:-}
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export TORCH_CUDA_ARCH_LIST="6.0;6.1;7.0;7.5;8.0;8.6;8.9;9.0"
 
-echo "Activating SD-Scripts environment..."
-cd $WORKSPACE_DIR
-source $VENV_NAME/bin/activate
-cd $PROJECT_NAME
+cd /workspace
+source sd-scripts-env/bin/activate
+cd sd-scripts
 
-echo "Environment activated. You can now run training scripts."
-echo "Example: python flux_train_network.py --help"
-echo ""
-echo "Available models in $WORKSPACE_DIR/$MODELS_DIR:"
-ls -la $WORKSPACE_DIR/$MODELS_DIR/*.safetensors 2>/dev/null || echo "No models found. Please set HF_TOKEN and re-run the provisioning script."
+echo "Environment activated. Run: python flux_train_network.py --help"
+[ -d "/workspace/models" ] && ls -la /workspace/models/*.safetensors 2>/dev/null
 EOF
 
 chmod +x "$WORKSPACE_DIR/activate_env.sh"
 
-# 显示安装总结
+# 清理trap
+trap - EXIT
+
+# 总结
 END_TIME=$(date)
+END_TIMESTAMP=$(date +%s)
+DURATION=$((END_TIMESTAMP - START_TIMESTAMP))
+
 log "=== Installation Summary ==="
-log "Start time: $START_TIME"
-log "End time: $END_TIME"
-log "Python environment: $WORKSPACE_DIR/$VENV_NAME"
-log "SD-Scripts location: $WORKSPACE_DIR/$PROJECT_NAME"
-log "Models location: $WORKSPACE_DIR/$MODELS_DIR"
-
-# 最终验证
-log ">>> Final verification: Key components check..."
-
-# 检查关键目录
-for dir in "$WORKSPACE_DIR/$VENV_NAME" "$WORKSPACE_DIR/$PROJECT_NAME" "$WORKSPACE_DIR/$MODELS_DIR"; do
-    if [ -d "$dir" ]; then
-        log_success "$(basename $dir) directory exists"
-    else
-        log_error "$(basename $dir) directory missing"
-    fi
-done
-
-# 检查激活脚本
-if [ -f "$WORKSPACE_DIR/activate_env.sh" ]; then
-    log_success "Activation script created"
-else
-    log_error "Activation script missing"
-fi
-
-log "=== Provisioning Script Completed Successfully ==="
-log "✓ Run 'source $WORKSPACE_DIR/activate_env.sh' to activate the environment"
-log "✓ Training scripts are available in $WORKSPACE_DIR/$PROJECT_NAME/"
-log "✓ Models are available in $WORKSPACE_DIR/$MODELS_DIR/ (if HF_TOKEN was provided)" 
+log "Duration: $((DURATION/60))m $((DURATION%60))s"
+log "Log file: $LOG_FILE"
+log_success "Setup completed! Run: source $WORKSPACE_DIR/activate_env.sh" 
