@@ -61,91 +61,57 @@ WAN_VAE_MODELS=(
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 
-function check_volume_comfyui() {
+function setup_volume_migration() {
     # Check if volume is available
     if [[ ! -d "/data" ]]; then
         printf "No volume detected. Using standard workspace installation.\n"
-        return 1
+        return
     fi
     
     # Check volume permissions
     if [[ ! -w "/data" ]]; then
         printf "Warning: No write permission to volume. Using workspace installation.\n"
-        return 1
+        return
     fi
     
-    printf "Volume detected. Checking for existing ComfyUI installation...\n"
+    printf "Volume detected. Checking for ComfyUI migration...\n"
     
-    # Check if symbolic link already exists and points to volume
-    if [[ -L "${WORKSPACE}/ComfyUI" ]] && [[ "$(readlink "${WORKSPACE}/ComfyUI")" == "/data/ComfyUI" ]]; then
-        printf "Symbolic link already exists and is correct.\n"
-        if [[ -f "/data/ComfyUI/main.py" ]]; then
-            printf "Found existing ComfyUI installation in volume. Ready to use.\n"
-            return 0
-        else
-            printf "Symbolic link exists but ComfyUI not fully installed. Will complete installation.\n"
-            return 1
-        fi
-    fi
-    
-    # Setup volume installation
+    # Check if volume already has a complete ComfyUI installation
     if [[ -d "/data/ComfyUI" && -f "/data/ComfyUI/main.py" ]]; then
         printf "Found existing ComfyUI installation in volume. Creating link...\n"
-        # Remove existing directory/link if it exists
-        if [[ -e "${WORKSPACE}/ComfyUI" ]]; then
-            rm -rf "${WORKSPACE}/ComfyUI"
-        fi
-        # Create symbolic link from workspace to volume
+        # Remove workspace installation and create link to volume
+        rm -rf "${WORKSPACE}/ComfyUI"
         if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
-            printf "Successfully linked ComfyUI from volume.\n"
-            return 0
+            printf "Successfully linked to existing volume installation.\n"
         else
-            printf "Error: Failed to create symbolic link. Using workspace installation.\n"
-            return 1
+            printf "Error: Failed to create symbolic link.\n"
         fi
-    else
-        printf "No existing ComfyUI found in volume. Migrating pre-installed ComfyUI to volume...\n"
-        
-        # Check if there's a pre-installed ComfyUI in workspace
-        if [[ -d "${WORKSPACE}/ComfyUI" && -f "${WORKSPACE}/ComfyUI/main.py" ]]; then
-            printf "Found pre-installed ComfyUI. Migrating to volume...\n"
-            # Copy the entire pre-installed ComfyUI to volume
-            cp -r "${WORKSPACE}/ComfyUI" "/data/"
-            # Remove the original
+        return
+    fi
+    
+    # Check if workspace has a complete ComfyUI installation to migrate
+    if [[ -d "${WORKSPACE}/ComfyUI" && -f "${WORKSPACE}/ComfyUI/main.py" ]]; then
+        printf "Found ComfyUI in workspace. Migrating to volume...\n"
+        # Copy the entire ComfyUI installation to volume
+        if cp -r "${WORKSPACE}/ComfyUI" "/data/"; then
+            printf "Successfully copied ComfyUI to volume.\n"
+            # Remove the original and create symbolic link
             rm -rf "${WORKSPACE}/ComfyUI"
-            # Create symbolic link from workspace to volume
             if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
-                printf "Successfully migrated and linked ComfyUI to volume.\n"
-                return 0
+                printf "Successfully migrated ComfyUI to volume.\n"
             else
                 printf "Error: Failed to create symbolic link after migration.\n"
-                return 1
             fi
         else
-            printf "No pre-installed ComfyUI found. Creating fresh installation in volume...\n"
-            # Ensure volume directory exists
-            mkdir -p "/data/ComfyUI"
-            # Remove existing directory/link if it exists
-            if [[ -e "${WORKSPACE}/ComfyUI" ]]; then
-                rm -rf "${WORKSPACE}/ComfyUI"
-            fi
-            # Create symbolic link first, then installation will go to volume
-            if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
-                printf "Successfully created symbolic link for new installation.\n"
-                return 1
-            else
-                printf "Error: Failed to create symbolic link. Using workspace installation.\n"
-                return 1
-            fi
+            printf "Error: Failed to copy ComfyUI to volume.\n"
         fi
+    else
+        printf "No complete ComfyUI installation found to migrate.\n"
     fi
 }
 
 function provisioning_start() {
     provisioning_print_header
-    
-    # Setup volume mounting if available
-    check_volume_comfyui
     
     provisioning_get_apt_packages
     provisioning_get_nodes
@@ -182,6 +148,10 @@ function provisioning_start() {
     provisioning_get_files \
         "${COMFYUI_DIR}/models/vae" \
         "${WAN_VAE_MODELS[@]}"
+    
+    # Setup volume mounting after all installations are complete
+    setup_volume_migration
+    
     provisioning_print_end
 }
 
