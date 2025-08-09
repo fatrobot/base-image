@@ -104,20 +104,39 @@ function check_volume_comfyui() {
             return 1
         fi
     else
-        printf "No existing ComfyUI found in volume. Will install to volume...\n"
-        # Ensure volume directory exists
-        mkdir -p "/data/ComfyUI"
-        # Remove existing directory/link if it exists
-        if [[ -e "${WORKSPACE}/ComfyUI" ]]; then
+        printf "No existing ComfyUI found in volume. Migrating pre-installed ComfyUI to volume...\n"
+        
+        # Check if there's a pre-installed ComfyUI in workspace
+        if [[ -d "${WORKSPACE}/ComfyUI" && -f "${WORKSPACE}/ComfyUI/main.py" ]]; then
+            printf "Found pre-installed ComfyUI. Migrating to volume...\n"
+            # Copy the entire pre-installed ComfyUI to volume
+            cp -r "${WORKSPACE}/ComfyUI" "/data/"
+            # Remove the original
             rm -rf "${WORKSPACE}/ComfyUI"
-        fi
-        # Create symbolic link first, then installation will go to volume
-        if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
-            printf "Successfully created symbolic link for new installation.\n"
-            return 1
+            # Create symbolic link from workspace to volume
+            if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
+                printf "Successfully migrated and linked ComfyUI to volume.\n"
+                return 0
+            else
+                printf "Error: Failed to create symbolic link after migration.\n"
+                return 1
+            fi
         else
-            printf "Error: Failed to create symbolic link. Using workspace installation.\n"
-            return 1
+            printf "No pre-installed ComfyUI found. Creating fresh installation in volume...\n"
+            # Ensure volume directory exists
+            mkdir -p "/data/ComfyUI"
+            # Remove existing directory/link if it exists
+            if [[ -e "${WORKSPACE}/ComfyUI" ]]; then
+                rm -rf "${WORKSPACE}/ComfyUI"
+            fi
+            # Create symbolic link first, then installation will go to volume
+            if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
+                printf "Successfully created symbolic link for new installation.\n"
+                return 1
+            else
+                printf "Error: Failed to create symbolic link. Using workspace installation.\n"
+                return 1
+            fi
         fi
     fi
 }
