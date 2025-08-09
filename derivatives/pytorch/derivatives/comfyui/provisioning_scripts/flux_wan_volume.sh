@@ -1,9 +1,7 @@
 #!/bin/bash
 
 source /venv/main/bin/activate
-
-# Volume detection will be handled in provisioning_start
-COMFYUI_DIR="${WORKSPACE}/ComfyUI"
+COMFYUI_DIR=${WORKSPACE}/ComfyUI
 
 # Packages are installed after nodes so we can fix them...
 
@@ -61,58 +59,8 @@ WAN_VAE_MODELS=(
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 
-function setup_volume_migration() {
-    # Check if volume is available
-    if [[ ! -d "/data" ]]; then
-        printf "No volume detected. Using standard workspace installation.\n"
-        return
-    fi
-    
-    # Check volume permissions
-    if [[ ! -w "/data" ]]; then
-        printf "Warning: No write permission to volume. Using workspace installation.\n"
-        return
-    fi
-    
-    printf "Volume detected. Checking for ComfyUI migration...\n"
-    
-    # Check if volume already has a complete ComfyUI installation
-    if [[ -d "/data/ComfyUI" && -f "/data/ComfyUI/main.py" ]]; then
-        printf "Found existing ComfyUI installation in volume. Creating link...\n"
-        # Remove workspace installation and create link to volume
-        rm -rf "${WORKSPACE}/ComfyUI"
-        if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
-            printf "Successfully linked to existing volume installation.\n"
-        else
-            printf "Error: Failed to create symbolic link.\n"
-        fi
-        return
-    fi
-    
-    # Check if workspace has a complete ComfyUI installation to migrate
-    if [[ -d "${WORKSPACE}/ComfyUI" && -f "${WORKSPACE}/ComfyUI/main.py" ]]; then
-        printf "Found ComfyUI in workspace. Migrating to volume...\n"
-        # Copy the entire ComfyUI installation to volume
-        if cp -r "${WORKSPACE}/ComfyUI" "/data/"; then
-            printf "Successfully copied ComfyUI to volume.\n"
-            # Remove the original and create symbolic link
-            rm -rf "${WORKSPACE}/ComfyUI"
-            if ln -sf "/data/ComfyUI" "${WORKSPACE}/ComfyUI"; then
-                printf "Successfully migrated ComfyUI to volume.\n"
-            else
-                printf "Error: Failed to create symbolic link after migration.\n"
-            fi
-        else
-            printf "Error: Failed to copy ComfyUI to volume.\n"
-        fi
-    else
-        printf "No complete ComfyUI installation found to migrate.\n"
-    fi
-}
-
 function provisioning_start() {
     provisioning_print_header
-    
     provisioning_get_apt_packages
     provisioning_get_nodes
     provisioning_get_pip_packages
@@ -148,10 +96,6 @@ function provisioning_start() {
     provisioning_get_files \
         "${COMFYUI_DIR}/models/vae" \
         "${WAN_VAE_MODELS[@]}"
-    
-    # Setup volume mounting after all installations are complete
-    setup_volume_migration
-    
     provisioning_print_end
 }
 
@@ -170,7 +114,7 @@ function provisioning_get_pip_packages() {
 function provisioning_get_nodes() {
     for repo in "${NODES[@]}"; do
         dir="${repo##*/}"
-        path="${COMFYUI_DIR}/custom_nodes/${dir}"
+        path="${COMFYUI_DIR}custom_nodes/${dir}"
         requirements="${path}/requirements.txt"
         if [[ -d $path ]]; then
             if [[ ${AUTO_UPDATE,,} != "false" ]]; then
@@ -249,7 +193,8 @@ function provisioning_has_valid_civitai_token() {
 function provisioning_download() {
     if [[ -n $HF_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
         auth_token="$HF_TOKEN"
-    elif [[ -n $CIVITAI_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
+    elif 
+        [[ -n $CIVITAI_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
         auth_token="$CIVITAI_TOKEN"
     fi
     if [[ -n $auth_token ]];then
